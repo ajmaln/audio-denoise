@@ -55,7 +55,7 @@ function App() {
       
       if (!workletModuleLoadedRef.current) {
         try {
-          await audioContextRef.current.audioWorklet.addModule('noise-suppressor-worklet.js');
+          await audioContextRef.current.audioWorklet.addModule('nn-suppressor-worklet.js');
           workletModuleLoadedRef.current = true;
         } catch (error) {
           console.error('Failed to load audio worklet:', error);
@@ -71,20 +71,13 @@ function App() {
       
       sourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
       
-      const noiseSuppressorNode = new AudioWorkletNode(audioContextRef.current, 'noise-suppressor-processor', {
+      const noiseSuppressorNode = new AudioWorkletNode(audioContextRef.current, 'nn-suppressor-processor', {
         processorOptions: {
           sampleLength: RNNOISE_SAMPLE_LENGTH
         }
       });
       
-      noiseSuppressorNode.port.onmessage = (event) => {
-        if (event.data.audioFrame) {
-          const processedFrame = isNoiseSuppressionEnabled
-            ? rnnoiseProcessorRef.current.processAudioFrame(event.data.audioFrame, true)
-            : event.data.audioFrame;
-          noiseSuppressorNode.port.postMessage({ processedFrame });
-        }
-      };
+      noiseSuppressorNode.port.postMessage({ command: 'setNoiseSuppressionEnabled', enabled: isNoiseSuppressionEnabled });
       
       sourceRef.current.connect(noiseSuppressorNode);
 
@@ -183,6 +176,9 @@ function App() {
 
   const toggleNoiseSuppression = () => {
     setIsNoiseSuppressionEnabled(!isNoiseSuppressionEnabled);
+    if (noiseSuppressorNode) {
+      noiseSuppressorNode.port.postMessage({ command: 'setNoiseSuppressionEnabled', enabled: !isNoiseSuppressionEnabled });
+    }
   };
 
   return (
