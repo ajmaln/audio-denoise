@@ -738,9 +738,12 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
         super();
 
         /**
-         * RnnoiseProcessor instance.
+         * RnnoiseProcessor instances, one for each channel.
          */
-        this._denoiseProcessor = new RnnoiseProcessor(createRNNWasmModuleSync());
+        this._denoiseProcessors = [
+            new RnnoiseProcessor(createRNNWasmModuleSync()),
+            new RnnoiseProcessor(createRNNWasmModuleSync())
+        ];
 
         /**
          * Audio worklets work with a predefined sample rate of 128.
@@ -750,13 +753,16 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
         /**
          * PCM Sample size expected by the denoise processor.
          */
-        this._denoiseSampleSize = this._denoiseProcessor.getSampleLength();
+        this._denoiseSampleSize = this._denoiseProcessors[0].getSampleLength();
 
         /**
          * Circular buffer data used for efficient memory operations.
          */
         this._circularBufferLength = leastCommonMultiple(this._procNodeSampleRate, this._denoiseSampleSize);
-        this._circularBuffer = new Float32Array(this._circularBufferLength);
+        this._circularBuffers = [
+            new Float32Array(this._circularBufferLength),
+            new Float32Array(this._circularBufferLength)
+        ];
 
         /**
          * The circular buffer uses a couple of indexes to track data segments. Input data from the stream is
@@ -778,87 +784,82 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
          * of denoised data not yet sent.
          */
         this._denoisedBufferIndx = 0;
+
+        /**
+         * Flag to enable/disable noise suppression
+         */
+        this._noiseSuppressionEnabled = true;
+
+        this.port.onmessage = (event) => {
+            if (event.data.command === 'setNoiseSuppressionEnabled') {
+                this._noiseSuppressionEnabled = event.data.enabled;
+            }
+        };
     }
 
-    /**
-     * Worklet interface process method. The inputs parameter contains PCM audio that is then sent to rnnoise.
-     * Rnnoise only accepts PCM samples of 480 bytes whereas `process` handles 128 sized samples, we take this into
-     * account using a circular buffer.
-     *
-     * @param {Float32Array[][]} inputs - Array of inputs connected to the node, each of them with their associated
-     * array of channels. Each channel is an array of 128 pcm samples.
-     * @param {Float32Array[][]} outputs - Array of outputs similar to the inputs parameter structure, expected to be
-     * filled during the execution of `process`. By default each channel is zero filled.
-     * @returns {boolean} - Boolean value that returns whether or not the processor should remain active. Returning
-     * false will terminate it.
-     */
     process(inputs, outputs) {
-        // We expect the incoming track to be mono, if a stereo track is passed only on of its channels will get
-        // denoised and sent pack.
-        // TODO Technically we can denoise both channel however this might require a new rnnoise context, some more
-        // investigation is required.
-        const inData = inputs[0][0];
-        const outData = outputs[0][0];
+        const input = inputs[0];
+        const output = outputs[0];
 
         // Exit out early if there is no input data (input node not connected/disconnected)
-        // as rest of worklet will crash otherwise
-        if (!inData) {
+        if (!input || input.length === 0) {
             return true;
         }
 
-        // Append new raw PCM sample.
-        this._circularBuffer.set(inData, this._inputBufferLength);
-        this._inputBufferLength += inData.length;
+        const channelCount = Math.min(input.length, output.length, this._denoiseProcessors.length);
 
-        // New raw samples were just added, start denoising frames, _denoisedBufferLength gives us
-        // the position at which the previous denoise iteration ended, basically it takes into account
-        // residue data.
-        for (; this._denoisedBufferLength + this._denoiseSampleSize <= this._inputBufferLength;
-            this._denoisedBufferLength += this._denoiseSampleSize) {
-            // Create view of circular buffer so it can be modified in place, removing the need for
-            // extra copies.
+        for (let channel = 0; channel < channelCount; channel++) {
+            const inData = input[channel];
+            const outData = output[channel];
 
-            const denoiseFrame = this._circularBuffer.subarray(
-                this._denoisedBufferLength,
-                this._denoisedBufferLength + this._denoiseSampleSize
-            );
-
-            this._denoiseProcessor.processAudioFrame(denoiseFrame, true);
+            // Append new raw PCM sample.
+            this._circularBuffers[channel].set(inData, this._inputBufferLength);
         }
 
-        // Determine how much denoised audio is available, if the start index of denoised samples is smaller
-        // then _denoisedBufferLength that means a rollover occurred.
-        let unsentDenoisedDataLength;
+        this._inputBufferLength += input[0].length;
 
+        // New raw samples were just added, start denoising frames
+        for (; this._denoisedBufferLength + this._denoiseSampleSize <= this._inputBufferLength;
+            this._denoisedBufferLength += this._denoiseSampleSize) {
+            
+            for (let channel = 0; channel < channelCount; channel++) {
+                const denoiseFrame = this._circularBuffers[channel].subarray(
+                    this._denoisedBufferLength,
+                    this._denoisedBufferLength + this._denoiseSampleSize
+                );
+
+                if (this._noiseSuppressionEnabled) {
+                    this._denoiseProcessors[channel].processAudioFrame(denoiseFrame, true);
+                }
+            }
+        }
+
+        // Determine how much denoised audio is available
+        let unsentDenoisedDataLength;
         if (this._denoisedBufferIndx > this._denoisedBufferLength) {
             unsentDenoisedDataLength = this._circularBufferLength - this._denoisedBufferIndx;
         } else {
             unsentDenoisedDataLength = this._denoisedBufferLength - this._denoisedBufferIndx;
         }
 
-        // Only copy denoised data to output when there's enough of it to fit the exact buffer length.
-        // e.g. if the buffer size is 1024 samples but we only denoised 960 (this happens on the first iteration)
-        // nothing happens, then on the next iteration 1920 samples will be denoised so we send 1024 which leaves
-        // 896 for the next iteration and so on.
-        if (unsentDenoisedDataLength >= outData.length) {
-            const denoisedFrame = this._circularBuffer.subarray(
-                this._denoisedBufferIndx,
-                this._denoisedBufferIndx + outData.length
-            );
+        // Copy denoised data to output when there's enough of it
+        if (unsentDenoisedDataLength >= output[0].length) {
+            for (let channel = 0; channel < channelCount; channel++) {
+                const denoisedFrame = this._circularBuffers[channel].subarray(
+                    this._denoisedBufferIndx,
+                    this._denoisedBufferIndx + output[channel].length
+                );
 
-            outData.set(denoisedFrame, 0);
-            this._denoisedBufferIndx += outData.length;
+                output[channel].set(denoisedFrame);
+            }
+            this._denoisedBufferIndx += output[0].length;
         }
 
-        // When the end of the circular buffer has been reached, start from the beginning. By the time the index
-        // starts over, the data from the begging is stale (has already been processed) and can be safely
-        // overwritten.
+        // Reset indices when necessary
         if (this._denoisedBufferIndx === this._circularBufferLength) {
             this._denoisedBufferIndx = 0;
         }
 
-        // Because the circular buffer's length is the lcm of both input size and the processor's sample size,
-        // by the time we reach the end with the input index the denoise length index will be there as well.
         if (this._inputBufferLength === this._circularBufferLength) {
             this._inputBufferLength = 0;
             this._denoisedBufferLength = 0;

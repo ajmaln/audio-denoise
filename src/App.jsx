@@ -17,6 +17,7 @@ function App() {
   const sourceRef = useRef(null);
   const rnnoiseProcessorRef = useRef(null);
   const workletModuleLoadedRef = useRef(false);
+  const noiseSuppressorNodeRef = useRef(null);
 
   useEffect(() => {
     const initRNNoise = async () => {
@@ -77,6 +78,8 @@ function App() {
         }
       });
       
+      noiseSuppressorNodeRef.current = noiseSuppressorNode;
+
       noiseSuppressorNode.port.postMessage({ command: 'setNoiseSuppressionEnabled', enabled: isNoiseSuppressionEnabled });
       
       sourceRef.current.connect(noiseSuppressorNode);
@@ -176,8 +179,8 @@ function App() {
 
   const toggleNoiseSuppression = () => {
     setIsNoiseSuppressionEnabled(!isNoiseSuppressionEnabled);
-    if (noiseSuppressorNode) {
-      noiseSuppressorNode.port.postMessage({ command: 'setNoiseSuppressionEnabled', enabled: !isNoiseSuppressionEnabled });
+    if (noiseSuppressorNodeRef.current) {
+      noiseSuppressorNodeRef.current.port.postMessage({ command: 'setNoiseSuppressionEnabled', enabled: !isNoiseSuppressionEnabled });
     }
   };
 
