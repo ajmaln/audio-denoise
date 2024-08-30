@@ -784,17 +784,6 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
          * of denoised data not yet sent.
          */
         this._denoisedBufferIndx = 0;
-
-        /**
-         * Flag to enable/disable noise suppression
-         */
-        this._noiseSuppressionEnabled = true;
-
-        this.port.onmessage = (event) => {
-            if (event.data.command === 'setNoiseSuppressionEnabled') {
-                this._noiseSuppressionEnabled = event.data.enabled;
-            }
-        };
     }
 
     process(inputs, outputs) {
@@ -828,9 +817,7 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
                     this._denoisedBufferLength + this._denoiseSampleSize
                 );
 
-                if (this._noiseSuppressionEnabled) {
-                    this._denoiseProcessors[channel].processAudioFrame(denoiseFrame, true);
-                }
+                this._denoiseProcessors[channel].processAudioFrame(denoiseFrame, true);
             }
         }
 
